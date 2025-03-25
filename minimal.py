@@ -553,6 +553,19 @@ def update_red(state, action, subnet_loc, processes, impacted, femitter_placed, 
                 impact_copy = new_impacted[valid].copy()
                 impact_copy[np.arange(len(host)), host] = 1
                 new_impacted[valid] = impact_copy
+    print(f"🛑 Exploit Selection Debug: {selected_exploit_idx}, Action: {action}")
+    print(f"🔍 Action: {action}, Available Exploits: {EXPLOITS}, Selected Exploit: {selected_exploit_idx}")
+    import numpy as numpy
+
+    # Force a random exploit selection for debugging
+    selected_exploit_idx = numpy.random.randint(0, len(EXPLOITS), size=state.shape[0])
+    action_reward[success == 1] += 10
+    action_reward[success == -1] -= 5
+
+    print(f"🚨 Forced Exploit Selection: {selected_exploit_idx}")
+    print(f"🚨 Red Agent Success: {success}, Selected Exploit: {selected_exploit_idx}")
+    print(f"🔍 Reward Before Update: {action_reward}")
+    print("returning")
 
     return next_state, action_reward, success, new_impacted, selected_exploit_idx
 
@@ -925,20 +938,19 @@ class SimplifiedCAGE(gym.Env):
 
 
 
-    def step(self, blue_action):
+    def step(self, blue_action, red_action):
         red_action = self._generate_red_action()
 
         if isinstance(blue_action, np.ndarray):
             blue_action = blue_action.item()  # Convert from array to scalar
-
+        
         true_state, reward_dict = self._process_actions(
             self.state, red_action, blue_action, self.subnets)
         
         self.state = true_state.copy()
 
         # ✅ Ensure reward is a float
-        reward = float(reward_dict["Blue"])  
-
+        reward = float(reward_dict["Blue"] - reward_dict["Red"])
         done = False  # ✅ SB3 expects a boolean, not an array
 
         next_state = self._process_state(
@@ -955,7 +967,9 @@ class SimplifiedCAGE(gym.Env):
 
         # ✅ Ensure blue_state is exactly 52 elements
         blue_state = blue_state[:52] if blue_state.shape[0] > 52 else np.pad(blue_state, (0, 52 - blue_state.shape[0]), 'constant')
-
+        print(f"🔍 Step Reward Check: {reward_dict}")
+        self._process_reward(self.state, reward_dict, self.impacted)
+        
         return blue_state, reward, done, info  # ✅ Correct return format
 
 
@@ -993,6 +1007,8 @@ class SimplifiedCAGE(gym.Env):
 
         # get next state and corresponding reward
         # add probability of failure
+        print(f"🔍 Processing Actions - Blue: {blue_action}, Red: {red_action}")
+
         true_state, red_reward, success, impacted, selected_exploit = update_red(
             state=state, action=red_action, subnet_loc=subnets, 
             processes=self.current_processes, 
@@ -1032,8 +1048,13 @@ class SimplifiedCAGE(gym.Env):
         self.current_processes = proc
         self.current_decoys = decoys
 
+
         # impact action should also influence blue but negatively
         blue_reward -= red_reward
+        print(f"🚨 Red Agent Success: {self.red_success}, Selected Exploits: {self.selected_exploit}")
+
+        print(f"🔍 Reward Debug: Blue Reward = {blue_reward}, Red Reward = {red_reward}")
+        print(f"🔍 Final Reward - Blue: {blue_reward}, Red: {red_reward}")
 
         return true_state, {'Blue': blue_reward, 'Red': red_reward}
 
@@ -1062,6 +1083,8 @@ class SimplifiedCAGE(gym.Env):
 
         # extract general information
         # mask out user0
+        print("🔍 I'm processing the reward!!!!")
+
         state_info = state.reshape(-1, self.num_nodes, 3).copy()
         state_info[:, 8] = 0
 
@@ -1106,6 +1129,10 @@ class SimplifiedCAGE(gym.Env):
         # update the reward based on access
         action_reward['Blue'] = action_reward['Blue'] - reward
         action_reward['Red'] = action_reward['Red'] + reward
+        print(f"🔍 User Host Access: {user_host_access}")
+        print(f"🔍 Ent Access: {ent_access}")
+        print(f"🔍 Impacted: {impacted}")
+        print(f"🔍 Reward Before Update: {reward}")
 
         return action_reward
 

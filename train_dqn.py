@@ -1,3 +1,4 @@
+from test_agent import B_line_minimal, React_restore_minimal
 import numpy as np
 from stable_baselines3 import DQN
 from minimal import SimplifiedCAGE  # Import MiniCAGE environment
@@ -25,8 +26,11 @@ import gym
 # ✅ Ensure Gym-compatible wrapping
 class GymCompatibleEnv(SimplifiedCAGE):
     def __init__(self, num_envs=1):
-        super().__init__(num_envs)
+        super().__init__(num_envs=num_envs, remove_bugs=True)
+        self.red_agent = B_line_minimal()     # Add Red Agent
+        self.blue_agent = React_restore_minimal()  # Add Blue Agent
         self._np_random = np.random.default_rng()  # ✅ Initialize RNG for seeding
+
     
     def seed(self, seed=None):
             """✅ Ensure SB3 can set seeds correctly."""
@@ -45,20 +49,44 @@ class GymCompatibleEnv(SimplifiedCAGE):
         else:
             obs = reset_output  # Fallback if only one value is returned
             info = {}           # Provide an empty info dictionary
+        print(f"🔁 Reset Observation: {obs.shape}, {obs}")
 
         obs = np.array(obs, dtype=np.float32).flatten()
         return obs, info  # Explicitly return both
 
 
     def step(self, action):
-        step_output = super().step(action)
-        if len(step_output) == 5:
-            return step_output
-    
-        obs, reward, done, info = step_output  # 🔥 Fix unpacking
-        truncated = False  # ✅ Add truncated flag
+        # 🔴 Generate Red Agent Action
+        print("starting step")
+        red_action = self.red_agent.get_action(self.state)
+        # 🔵 Use DQN's Blue Agent Action
+        blue_action = action
 
-        return np.array(obs, dtype=np.float32), reward, done, truncated, info  # ✅ Ensure output format
+        print(f"🔴 Red Action: {red_action.flatten()}, 🔵 Blue Action: {blue_action}")
+
+        # 🛠️ Pass Actions to SimplifiedCAGE
+        step_output = super().step(blue_action=blue_action, red_action=red_action)
+
+        if len(step_output) == 5:  # Already SB3 format
+            return step_output
+        
+        # 🧱 Handle Classic Output
+        obs, reward, done, info = step_output
+        truncated = done  # ✅ Treat done as truncated for SB3 compatibility
+        print(f"📊 Raw Observation from step() (Before Flatten): {obs.shape}, {obs}")
+        if obs.shape[0] < 52:
+            obs = np.pad(obs, (0, 52 - obs.shape[0]), 'constant')
+        elif obs.shape[0] > 52:
+            obs = obs[:52]
+        print(f"🏆 Reward: {reward}")
+
+        print(f"📊 Step Observation: {obs.shape}, {obs}")
+# Check the observation size inside the environment
+        print(f"📊 Step Observation (Before Flatten): {obs.shape}, {obs}")
+        
+
+        # 🧹 Ensure Consistent Output Shape
+        return np.array(obs, dtype=np.float32), reward, done, truncated, info
 
 
 # ✅ Manually wrap it in DummyVecEnv
@@ -93,5 +121,4 @@ for _ in range(10):
     print(f"Action: {action}, Reward: {reward}")
     if done:
         obs = env.reset()
-
 
