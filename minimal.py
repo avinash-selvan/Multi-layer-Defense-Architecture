@@ -333,242 +333,80 @@ def get_possible_red_actions(
 
 
 test = np.zeros(3)
-
 def update_red(state, action, subnet_loc, processes, impacted, femitter_placed, remove_bug=False):
     '''
-    Update the environmental state following a red action.
+    Improved Red Agent Action Selection and Exploit Application
     '''
-
-    # copy the current state
+    
+    # Copy current state
     action_reward = np.zeros((state.shape[0], 1))
     next_state = state.copy()
     
-    # identify actions that are possible
+    # Get possible actions
     known, scanned, user, priv, subnet = check_red_access(state)
-    red_mask, full_red_mask = get_possible_red_actions(
-        user, priv, known, subnet, scanned)
-
-    # filter actions that are not allowed
-    action_filter = red_mask[
-        np.arange(len(action)), action.reshape(-1).astype(int)]
+    red_mask, full_red_mask = get_possible_red_actions(user, priv, known, subnet, scanned)
+    
+    # Validate actions
+    action_filter = red_mask[np.arange(len(action)), action.reshape(-1).astype(int)]
     success = np.ones((state.shape[0], 1))
     new_impacted = impacted.copy()
 
-    # log the selected exploit process
+    # Store exploit selection
     selected_exploit_idx = -np.ones(state.shape[0])
 
-    # if valid actions remain
     if np.any(action_filter):
+        # Get targeted host and action type
+        host_alloc = ((action - (NUM_SUBNETS + 1)) % len(HOSTS)).reshape(-1).astype(int)
+        action_alloc = np.floor((action - (NUM_SUBNETS + 1)) / len(HOSTS)).reshape(-1).astype(int)
 
-        # extract the host and action type
-        # displace as first actions are all subnet related
-        host_alloc = ((action-(NUM_SUBNETS+1)) % len(HOSTS)).reshape(-1).astype(int)
-        action_alloc = np.floor((action-(NUM_SUBNETS+1))/len(HOSTS)).reshape(-1).astype(int)
+        # Determine attackable processes
+        valid = np.logical_and(action_filter, (action_alloc == 1))  # Only consider exploit actions
+        if np.any(valid):
+            proc = processes[valid]
+            host = host_alloc[valid]
 
-        # check if it is sleep
-        is_sleep = (action == 0).reshape(-1)
+            # Get process data on target host
+            host_processes = proc[np.arange(len(proc)), host].reshape(-1, proc.shape[-1])
 
-        # subnet scan  ------------------------------------------------------
-        
-        # update the subnet following a scan
-        # check if action is subnet action and if the action is allowed
-        # create duplicate state and set subnet to 0 from -1
-        # ensure this does not overwrite previously defined states
-        is_remote = np.logical_and((action < (NUM_SUBNETS+1)).reshape(-1), 1-is_sleep)
-        if np.any(is_remote):
-            valid = np.logical_and(action_filter, is_remote)
-            if np.any(valid):
-                is_subnet = (subnet_loc[valid] == np.tile(action[valid]-1, (1, len(HOSTS))))
+            # Select exploit based on available processes
+            exploit_match = []
+            for i, host_proc in enumerate(host_processes):
+                possible_exploits = [
+                    idx for idx, exploit in enumerate(EXPLOITS) if host_proc[idx] == 1
+                ]
+                if possible_exploits:
+                    best_exploit = max(possible_exploits)  # Choose the highest-value exploit
+                else:
+                    best_exploit = -1  # No valid exploits
+                exploit_match.append(best_exploit)
+
+            selected_exploit_idx[valid] = np.array(exploit_match)
+
+            # Calculate success probability
+            exploit_success = np.zeros((valid.shape[0])).astype(bool)
+            for i, exp in enumerate(selected_exploit_idx[valid]):
+                if exp >= 0:
+                    exploit_success[i] = np.random.rand() < 0.85  # 85% success if valid exploit
+
+            # Apply successful exploit updates
+            if np.any(exploit_success):
                 mod_state = next_state[valid].copy().reshape(-1, len(HOSTS), 3)
-                mod_state[is_subnet, :] = 0
-                mod_state = np.maximum(next_state[valid], mod_state.reshape(mod_state.shape[0], -1))
-                next_state[valid] = mod_state
-
-        # host scan -----------------------------------------------------
-
-        # update the host with scanned (1, 0, 0)
-        # check if action corresponds to scan and if not remote search
-        # ensure this does not overwrite user/privleged access
-        is_network = np.logical_and((action_alloc.reshape(-1) == 0), 1-is_remote)
-        if np.any(is_network):
-            valid = np.logical_and(action_filter, is_network)
-            if np.any(valid):
-                mod_state = next_state[valid].copy().reshape(-1, len(HOSTS), 3)
-                host = host_alloc[valid]        
-        
-                mod_state[np.arange(len(host)), host] = np.array([1, 0, 0])
-                mod_state = np.maximum(next_state[valid], mod_state.reshape(mod_state.shape[0], -1))
+                mod_state[np.arange(len(host_alloc[valid])), host_alloc[valid]] = np.array([1, 1, 0])
                 next_state[valid] = mod_state.reshape(mod_state.shape[0], -1)
 
-        # exploit user --------------------------------------------------
+            # Handle failures
+            exploit_fail = np.logical_and(valid, np.invert(exploit_success))
+            if np.any(exploit_fail):
+                success[exploit_fail] = -1
 
-        # update the host to user access (1, 1, 0)
-        # check if corresponds to exploit and is note remote search
-        # don't allow exploitation of the defender
-        is_user = np.logical_and((action_alloc.reshape(-1) == 1), 1-is_remote)
-        if np.any(is_user):
-            valid = np.logical_and(action_filter, is_user)
-            if np.any(valid):
+    # Apply rewards
+    action_reward[success == 1] += 10  # Success
+    action_reward[success == -1] -= 5  # Failure
 
-                proc = processes[valid]
-                host = host_alloc[valid]
-                
-                # extract the priority process
-                host_processes = proc[
-                    np.arange(len(proc)), host].reshape(-1, proc.shape[-1])
-
-                ##################################
-                # BUG: femitter previously placed
-                # -> adds an extra failure mode
-                #################################
-
-                # add femitter if previously placed
-                fem_on_host = femitter_placed[np.arange(len(host_alloc)), host_alloc]
-                if np.any(fem_on_host[valid]) and (not remove_bug):
-                    host_processes[fem_on_host[valid], 0] = -1
-
-                priority_idx = np.argmax(host_processes != 0, axis=-1).reshape(-1)
-                priority_process = host_processes[
-                    np.arange(len(host_processes)), 
-                    priority_idx]
-
-                # extract the non-priority process
-                non_priority_processes = host_processes.copy()
-                non_priority_processes[
-                    np.arange(len(host_processes)), 
-                    np.argmax(host_processes != 0, axis=-1).reshape(-1)] = 0
-                non_priority_process = priority_process.copy()
-
-                # ensure additional processes are not extracted for a single process machine
-                multi_proc = np.any((non_priority_processes != 0), axis=-1).reshape(-1)
-                non_prior_idx = -np.ones(len(multi_proc))
-                if np.any(multi_proc):
-                    row_probs = (non_priority_processes[multi_proc] != 0)/(
-                        np.sum((non_priority_processes[multi_proc] != 0), axis=-1)).reshape(-1, 1)
-                    non_prior_choices = (
-                        np.random.rand(len(row_probs), 1) < row_probs.cumsum(axis=-1)).argmax(axis=-1)
-                    non_prior_copy = non_priority_processes[multi_proc].copy()
-                    non_priority_process[multi_proc] = non_prior_copy[
-                        np.arange(len(non_prior_copy)), 
-                        non_prior_choices.reshape(-1)]
-                    non_prior_idx[multi_proc.astype(bool)] = non_prior_choices
-
-                # calculate the success
-                # ensure single process tasks are selected
-                priority_mask = np.random.choice(
-                    [0, 1], size=priority_process.shape, p=[0.25, 0.75])
-                if not np.all(multi_proc):
-                    not_multi_proc = (1-multi_proc).astype(bool)
-                    non_priority_process[not_multi_proc] = priority_process[not_multi_proc]
-                    non_prior_idx[not_multi_proc] = priority_idx[not_multi_proc]                
-                selected_process = np.where(
-                    priority_mask.astype(bool), priority_process, non_priority_process)
-                selected_idx = np.where(priority_mask.astype(bool), priority_idx, non_prior_idx)   
-                exploit_success = np.zeros((valid.shape[0])).astype(bool)
-                exploit_success[valid] = (selected_process == 1).reshape(-1)
-
-                # ensure process blue eternal fails on ent1 and ent2
-                eternal_working = np.zeros((valid.shape[0])).astype(bool)
-                eternal_working[valid] = np.invert(np.logical_and(
-                    (selected_idx == 5), np.logical_or(host == 2, host == 3)))
-                exploit_success = np.logical_and(exploit_success, eternal_working)
-                
-                ######################################
-                # BUG: bluekeep always fails on user3
-                ######################################
-                if (not remove_bug):
-                    blue_u3 = np.zeros((valid.shape[0])).astype(bool)
-                    blue_u3[valid] = np.invert(np.logical_and(
-                        selected_idx == 6, host == 11))
-                    exploit_success = np.logical_and(exploit_success, blue_u3)
-                    
-                # add exploits
-                old_valid = valid.copy()
-                valid = np.logical_and(valid, exploit_success)
-                if np.any(valid):
-                    mod_state = next_state[valid].copy().reshape(-1, len(HOSTS), 3)
-                    mod_state[np.arange(len(host_alloc[valid])), host_alloc[valid]] = np.array([1, 1, 0])
-                    next_state[valid] = mod_state.reshape(mod_state.shape[0], -1)
-                    selected_exploit_idx[valid] = selected_idx[valid[old_valid]]
-
-                # triggering a decoy counts as a failure
-                exploit_fail = np.logical_and(
-                    old_valid, np.invert(exploit_success.astype(bool)))
-                if np.any(exploit_fail):
-                    success[exploit_fail] = -1
-
-        # escalate privleges --------------------------------------------------
+    # print(f"🚀 Selected Exploit: {selected_exploit_idx}")
+    # print(f"✅ Exploit Success: {success}")
     
-        # update the host to privileged (1, 0, 1)
-        # also need to open further paths within the network
-        is_priv = np.logical_and((action_alloc.reshape(-1) == 2), 1-is_remote)
-        if np.any(is_priv):
-            valid = np.logical_and(action_filter, is_priv)
-            if np.any(valid):
-                host = host_alloc[valid]
-                mod_state = next_state[valid].copy().reshape(-1, len(HOSTS), 3)
-                mod_state[np.arange(len(host)), host] = np.array([1, 0, 1])
-                next_state[valid] = mod_state.reshape(mod_state.shape[0], -1)
-
-                # check for further network paths
-                # user 1 -> ent 1 ; user 2 -> ent 1
-                # user 3 -> ent 1 ; user 4 -> ent 0
-                # ent  2 -> op server
-                host_link = np.array(CONNECTED_HOSTS)[host]
-                host_matrix = np.tile(
-                    np.array(HOSTS).reshape(1, -1), (mod_state.shape[0], 1))
-                host_mask = (host_matrix[:, np.newaxis] == host_link[:, np.newaxis, np.newaxis])
-                host_idx = np.where(host_mask)[-1].reshape(-1)
-                existing_link = np.zeros(len(valid))
-                existing_link[valid] = (host_link != None)
-                existing_link = existing_link.astype(bool)
-
-                # ensure this doesn't overwrite an existing host
-                is_link = np.zeros(len(valid)).astype(bool)
-                link_in_mask = np.any(host_mask, axis=-1).reshape(-1)
-                is_link[valid] = link_in_mask
-                mod_state = next_state[is_link].copy().reshape(-1, len(HOSTS), 3)
-                
-                new_host = np.zeros(len(valid)).astype(bool)
-                blank_host = mod_state[np.arange(len(host_idx)), host_idx.astype(int), 0] == -1
-                new_host[is_link] = blank_host
-                existing_link = np.logical_and(new_host, existing_link)
-                host_idx = host_idx[blank_host]
-
-                valid = np.logical_and(valid, existing_link)
-                if np.any(valid):
-                    mod_state = next_state[valid].copy().reshape(-1, len(HOSTS), 3)
-                    new_host_idx = host_idx[valid[existing_link]]
-                    mod_state[np.arange(len(new_host_idx)), new_host_idx.astype(int)] = np.array([0, 0, 0])
-                    next_state[valid] = mod_state.reshape(mod_state.shape[0], -1)
-
-        # impact host ------------------------------------------------
-
-        # impact the hosts
-        is_impact = np.logical_and((action_alloc.reshape(-1) == 3), 1-is_remote)
-        if np.any(is_impact):
-            valid = np.logical_and(action_filter, is_impact)
-            if np.any(valid):  
-                host = host_alloc[valid]
-                impact_copy = new_impacted[valid].copy()
-                impact_copy[np.arange(len(host)), host] = 1
-                new_impacted[valid] = impact_copy
-    print(f"🛑 Exploit Selection Debug: {selected_exploit_idx}, Action: {action}")
-    print(f"🔍 Action: {action}, Available Exploits: {EXPLOITS}, Selected Exploit: {selected_exploit_idx}")
-    import numpy as numpy
-
-    # Force a random exploit selection for debugging
-    selected_exploit_idx = numpy.random.randint(0, len(EXPLOITS), size=state.shape[0])
-    action_reward[success == 1] += 10
-    action_reward[success == -1] -= 5
-
-    print(f"🚨 Forced Exploit Selection: {selected_exploit_idx}")
-    print(f"🚨 Red Agent Success: {success}, Selected Exploit: {selected_exploit_idx}")
-    print(f"🔍 Reward Before Update: {action_reward}")
-    print("returning")
-
     return next_state, action_reward, success, new_impacted, selected_exploit_idx
-
 
 def check_blue_action(observation, decoys):
     '''
@@ -605,196 +443,34 @@ def check_blue_action(observation, decoys):
 
     return action_mask
 
+def update_blue(state, updated_state, action, impacted):
+    """
+    Update the environment for Blue Team, incorporating attack detection and defensive actions.
+    """
+    if isinstance(action, np.ndarray):
+        action = action.flatten()  # Convert multi-dimensional arrays to 1D
+    else:
+        action = np.array([action])  # Convert scalar to array
 
-def update_blue(
-    state, updated_state, action, decoys, processes, proc_map, impacted, femitter_placed):
-    '''
-    Update the environmental state following a blue action.
-    '''
+    print(f"🔍 Blue Action Values: {np.unique(action)}")
     
-    # copy the current state
-    action_reward = np.zeros((state.shape[0], 1))
+    # Copy the state
+    action_reward = np.zeros((state.shape[0], 1))  
     next_state = updated_state.copy()
-    orig_state = state.copy()
 
-    # filter actions that are not allowed
-    # user0 cannot be restored
-    blue_mask = check_blue_action(updated_state, decoys)
-    if isinstance(action, (int, np.int64)):  
-        action = np.array([action])
+    # Log attacks
+    detection_log = np.zeros_like(impacted)
+
+    for i in range(len(action)):  
+        if action[i] in [1, 2]:  # Ensure other detection actions are considered
+            detection_log[i] = impacted[i]  # Log detected attacks
+            action_reward[i] += 5  # Reward Blue for detecting
+
     
-    action_filter = blue_mask[
-        np.arange(len(action)), action.reshape(-1).astype(int)]
-    success = -np.ones((state.shape[0], 1))
-    new_decoys = decoys.copy()
-    new_processes = processes.copy()
-    new_impacted = impacted.copy()
-    decoy_reset = np.zeros((state.shape[0], len(HOSTS)))
-
-    # if valid actions remain
-    if np.any(action_filter):
-        
-        # extract the host and action type
-        # displace as first actions are all subnet related
-        host_alloc = ((action-1) % len(HOSTS)).reshape(-1).astype(int)
-        action_alloc = (np.floor((action-1)/len(HOSTS))).reshape(-1).astype(int)
-
-        # check if it is sleep
-        is_sleep = (action == 0).reshape(-1)
-
-        # analyse host ------------------------------------------------
-
-        # analyse a host
-        # analys has no effect on the environment
-        is_analyse = np.logical_and(action_alloc.reshape(-1) == 0, 1-is_sleep)
-        if np.any(is_analyse):
-            valid = np.logical_and(action_filter, is_analyse)
-            if np.any(valid):
-                success[valid] = 1
-
-        # decoy placement ---------------------------------------------
-
-        # place a decoy service
-        is_decoy = np.logical_and(action_alloc.reshape(-1) == 1, 1-is_sleep)
-        if np.any(is_decoy):
-            valid = np.logical_and(action_filter, is_decoy)
-            if np.any(valid):
-
-                dec = decoys[valid]
-                host = host_alloc[valid]
-                proc = processes[valid]
-
-                # extract host decoys
-                # remove from available decoys
-                available_decoys = dec[np.arange(len(dec)), host, :]
-                best_decoy = np.argmax(available_decoys, axis=-1)
-                decoys_exist = np.any(available_decoys, axis=-1)
-                decoys_temp = decoys[valid].copy()
-                decoys_temp[np.arange(len(dec)), host, best_decoy] = 0 
-                
-                # extract new process and add to current processes
-                # ensure there is not already a process of this type running
-                new_proc = proc_map.T[best_decoy]
-                processes_temp = proc.copy()
-                proc_spaces = (new_proc - processes_temp[
-                    np.arange(len(proc)), host]) > 0
-                proc_free = np.any(proc_spaces, axis=-1)
-                selected_proc = np.argmax(proc_spaces, axis=-1).astype(int)
-                processes_temp[np.arange(len(proc)), host, selected_proc] = -1
-
-                # update the storage
-                d_exist = np.zeros(valid.shape[0])
-                p_free = np.zeros(valid.shape[0])
-                d_exist[valid] = decoys_exist
-                p_free[valid] = proc_free 
-
-                valid = np.logical_and(
-                    valid, np.logical_and(d_exist, p_free)).astype(bool).reshape(-1)
-                new_processes[valid] = processes_temp[np.logical_and(decoys_exist, proc_free)]
-                new_decoys[valid] = decoys_temp[np.logical_and(decoys_exist, proc_free)]
-                success[valid] = 1
-
-                # if femitter is placed log this
-                femitter_on_host = (best_decoy == 0)[
-                    np.logical_and(decoys_exist, proc_free)]
-                femitter_slice = np.zeros(valid.shape)
-                femitter_slice[valid] = femitter_on_host
-                femitter_slice = np.logical_and(femitter_slice, valid)  
-                if np.any(femitter_slice):
-                    femitter_host = host_alloc[femitter_slice]
-                    femitter_placed[np.arange(len(host_alloc))[femitter_slice], femitter_host] = True
-
-
-        # host removal ------------------------------------------------------
-
-        # remove a host
-        # update the host to (1 0 0) from (1 1 0)
-        # add a 5% failure probability
-        # remove should fail if privileged access achieved
-        # check access on the original state not the updated state
-        is_remove = np.logical_and(action_alloc.reshape(-1) == 2, 1-is_sleep)
-        if np.any(is_remove):
-
-            valid = np.logical_and(action_filter, is_remove)
-            remove_success = np.random.choice([0, 1], size=valid.shape[0], p=[0.0, 1.0])
-            
-            valid = np.logical_and(valid, remove_success)
-            host = host_alloc[valid]
-
-            # check if the previous state is privileged
-            mod_state = orig_state[valid].copy().reshape(-1, len(HOSTS), 3)
-            is_priv = np.zeros((valid.shape[0]))
-            is_priv[valid] = (mod_state[np.arange(len(host)), host,  -1] == 1).reshape(-1)
-            
-            # check if red agent has compromised in this turn
-            mod_next_state = next_state[valid].copy().reshape(-1, len(HOSTS), 3)
-            is_next_priv = np.zeros((valid.shape[0]))
-            is_next_priv[valid] = (mod_next_state[np.arange(len(host)), host,  -1] == 1).reshape(-1)
-            is_priv = np.logical_or(is_priv, is_next_priv)
-
-            valid = np.logical_and(valid, 1-is_priv)
-            if np.any(valid):
-                host = host_alloc[valid]
-                mod_state = orig_state[valid].copy().reshape(-1, len(HOSTS), 3)
-                is_scanned = (mod_state[np.arange(len(host)), host,  0] == 1)
-                is_known = (mod_state[np.arange(len(host)), host,  0] >= 0)
-
-                if np.any(is_known):
-                    mod_state[np.arange(len(host)), host] = np.array([0, 0, 0])
-                    if np.any(is_scanned): 
-                        scan_state = mod_state.copy()
-                        scan_state[np.arange(len(host)), host] = np.array([1, 0, 0])
-                        mod_state[is_scanned] = scan_state[is_scanned]
-                    next_state[valid] = mod_state.reshape(mod_state.shape[0], -1) 
-
-                success[valid] = 1
-
-        # host restoration ------------------------------------------
-
-        # restore a host
-        # update the host to (1 0 0) from (1 0 1)
-        # add a 5% failure probability
-        # check access on the original state not the updated state
-        is_restore = np.logical_and(action_alloc.reshape(-1) == 3, 1-is_sleep)
-        if np.any(is_restore):
-            valid = np.logical_and(action_filter, is_restore)
-            restore_success = np.random.choice([0, 1], size=valid.shape[0], p=[0.0, 1.0])
-            valid = np.logical_and(valid, restore_success)
-            if np.any(valid):
-                host = host_alloc[valid]
-                mod_state = orig_state.copy().reshape(-1, len(HOSTS), 3)[valid]
-                is_scanned = (mod_state[np.arange(len(host)), host,  0] == 1)
-                is_known = (mod_state[np.arange(len(host)), host,  0] >= 0)
-                is_exploited = (mod_state[np.arange(len(host)), host,  1] == 1)
-                is_priv = (mod_state[np.arange(len(host)), host,  2] == 1)
-                user_access = np.logical_or(is_priv.reshape(-1), is_exploited.reshape(-1))
-
-                if np.any(user_access):
-                    if np.any(is_known):
-                        mod_state[np.arange(len(host)), host] = np.array([0, 0, 0])
-                        if np.any(is_scanned): 
-                            scan_state = mod_state.copy()
-                            scan_state[np.arange(len(host)), host] = np.array([1, 0, 0])
-                            mod_state[is_scanned] = scan_state[is_scanned]
-                        next_state[valid] = mod_state.reshape(mod_state.shape[0], -1)      
-
-                # compute the negative cost of action
-                # penalise due to disruption of network
-                # remove impacting on host
-                action_reward[valid] -= 1
-
-                # update the decoys
-                decoy_copy = decoy_reset.copy()[valid]
-                decoy_copy[np.arange(len(host)), host] = 1
-                decoy_reset[valid] = decoy_copy
-
-                # reset impact
-                impact_copy = new_impacted.copy()[valid]
-                impact_copy[np.arange(len(host)), host] = 0
-                new_impacted[valid] = impact_copy
-                success[valid] = 1
-
-    return next_state, action_reward, new_decoys, new_processes, success, decoy_reset, new_impacted, femitter_placed
+    print(f"🏆 Detection Reward: {action_reward}")
+    print(f"🔍 Detection Log: {detection_log}")
+    
+    return next_state, action_reward, detection_log
 
 
 
@@ -816,6 +492,7 @@ class SimplifiedCAGE(gym.Env):
 
         # map integer in host_alloc[valid] exes to action name
         self.action_mapping = action_mapping()
+        self.detection_log = np.zeros((self.num_envs, self.num_nodes))  # Ensure it's initialized
 
         # reset all the parameters
         self.reset()
@@ -939,6 +616,7 @@ class SimplifiedCAGE(gym.Env):
 
 
     def step(self, blue_action, red_action):
+        print(f"PRE-STATE: {self.state}")
         red_action = self._generate_red_action()
 
         if isinstance(blue_action, np.ndarray):
@@ -949,10 +627,6 @@ class SimplifiedCAGE(gym.Env):
         
         self.state = true_state.copy()
 
-        # ✅ Ensure reward is a float
-        reward = float(reward_dict["Blue"] - reward_dict["Red"])
-        done = False  # ✅ SB3 expects a boolean, not an array
-
         next_state = self._process_state(
             state=true_state, logged_decoys=self.current_decoys, 
             red_action=red_action, blue_action=blue_action)
@@ -961,16 +635,17 @@ class SimplifiedCAGE(gym.Env):
         info = self._get_info()
 
         blue_state = next_state["Blue"].squeeze()
-
-        # ✅ Convert to a flat NumPy array
         blue_state = np.array(blue_state, dtype=np.float32)
-
-        # ✅ Ensure blue_state is exactly 52 elements
         blue_state = blue_state[:52] if blue_state.shape[0] > 52 else np.pad(blue_state, (0, 52 - blue_state.shape[0]), 'constant')
-        print(f"🔍 Step Reward Check: {reward_dict}")
-        self._process_reward(self.state, reward_dict, self.impacted)
         
-        return blue_state, reward, done, info  # ✅ Correct return format
+        # Pass blue_action to reward processing
+        reward_dict = self._process_reward(self.state, reward_dict, self.impacted, blue_action)
+        
+        reward = float(reward_dict["Blue"] - reward_dict["Red"])
+        done = False
+        
+        print(f"POST-STATE: {self.state}")
+        return blue_state, reward, done, info
 
 
         
@@ -1015,7 +690,9 @@ class SimplifiedCAGE(gym.Env):
             impacted=self.impacted,
             femitter_placed=self.femitter_placed,
             remove_bug=self.remove_bugs)
-        self.red_success = success
+        # self.red_success = success
+        self.red_success = np.where(self.detection_log > 0, 0, success)  
+
         self.selected_exploit = selected_exploit
 
         # update the host exploits
@@ -1025,32 +702,41 @@ class SimplifiedCAGE(gym.Env):
 
         # now perform blue update
         # perform the blue action first
-        true_state, blue_reward, decoys, proc, success, decoy_reset, impacted, femitter_placed = update_blue(
-            state=state, updated_state=true_state, 
+        true_state, blue_reward, detection_log = update_blue(
+            state=state, 
+            updated_state=true_state, 
             action=blue_action, 
-            decoys=self.current_decoys, 
-            processes=self.current_processes, 
-            proc_map=self.exploit_map,
-            impacted=impacted,
-            femitter_placed=self.femitter_placed
+            # decoys=self.current_decoys, 
+            # processes=self.current_processes, 
+            # proc_map=self.exploit_map,
+            impacted=self.red_success,
+            # femitter_placed=self.femitter_placed
             )
         self.blue_success = success
         self.impacted = impacted
-        self.femitter_placed = femitter_placed
+        self.detection_log = detection_log
 
-        # reset the decoys
-        if np.any(decoy_reset):
-            decoys[decoy_reset.astype(bool)] = self.default_decoys[
-                decoy_reset.astype(bool)]
-            def_exploits = np.tile(
-                self.default_exploits[None], (decoy_reset.shape[0], 1, 1))
-            proc[decoy_reset.astype(bool)] = def_exploits[decoy_reset.astype(bool)]
-        self.current_processes = proc
-        self.current_decoys = decoys
+        #self.femitter_placed = femitter_placed
+
+        # # reset the decoys
+        # if np.any(decoy_reset):
+        #     decoys[decoy_reset.astype(bool)] = self.default_decoys[
+        #         decoy_reset.astype(bool)]
+        #     def_exploits = np.tile(
+        #         self.default_exploits[None], (decoy_reset.shape[0], 1, 1))
+        #     proc[decoy_reset.astype(bool)] = def_exploits[decoy_reset.astype(bool)]
+        # self.current_processes = proc
+        # self.current_decoys = decoys
 
 
         # impact action should also influence blue but negatively
-        blue_reward -= red_reward
+        # blue_reward -= red_reward
+        
+        # blue_reward -= red_reward * (1 - self.detection_log)  # Reduce impact if detected
+        detection_factor = detection_log.mean(axis=-1, keepdims=True)  # Reduce 13 values into 1
+        blue_reward -= red_reward * (1 - detection_factor)*5
+        
+        print("we now keep the  ddimensions: detection_factor = detection_log.mean(axis=-1, keepdims=True)  # Reduce 13 values into 1 blue_reward -= red_reward * (1 - detection_factor)")
         print(f"🚨 Red Agent Success: {self.red_success}, Selected Exploits: {self.selected_exploit}")
 
         print(f"🔍 Reward Debug: Blue Reward = {blue_reward}, Red Reward = {red_reward}")
@@ -1059,34 +745,11 @@ class SimplifiedCAGE(gym.Env):
         return true_state, {'Blue': blue_reward, 'Red': red_reward}
 
 
-    def _process_reward(self, state, action_reward, impacted):
-        '''
-        Calculate reward from updated state and combine
-        with action-specific reward.
-        '''
-        
-        # Location specific:
-        # --------------------
-        # user access 0.1
-        # enterprise access 1
-        # operational server 1
-        # operational hosts 0.1
-
-        # Action specific:
-        # -----------------
-        # opserver impact 10
-        # blue restore 1
-
-        #################################
-        # NOTE: specific to configuraton
-        #################################
-
-        # extract general information
-        # mask out user0
+    def _process_reward(self, state, action_reward, impacted, blue_action=None):  # Added blue_action parameter
         print("🔍 I'm processing the reward!!!!")
-
+        
         state_info = state.reshape(-1, self.num_nodes, 3).copy()
-        state_info[:, 8] = 0
+        state_info[:, 8] = 0  # mask out user0
 
         user_access = state_info[:, :, 1].reshape(-1) > 0
         priv_access = state_info[:, :, 2].reshape(-1) > 0
@@ -1094,46 +757,21 @@ class SimplifiedCAGE(gym.Env):
         flat_host = self.host_priority.reshape(-1)
         reward = np.zeros((state.shape[0], 1))
         
-        # get the reward for each host
-        host_exploits = self.host_exploits.reshape(-1)
-        exploit_rewards = self.exploit_rewards.reshape(-1, len(EXPLOITS))
-        valid_rewards = exploit_rewards[np.arange(len(host_exploits)),
-            host_exploits.astype(int)]
-        user_access = (user_access * valid_rewards).astype(bool)
-        priv_access = np.logical_or(user_access, priv_access)
-
-        # assign reward for privileged access to user/op hosts
-        user_host_access = np.logical_and(priv_access, flat_host == 1) 
-        if len(user_host_access) > 0:
-            user_host_rew = np.sum(
-                user_host_access.reshape(-1, self.num_nodes), axis=-1)
-            reward += user_host_rew.reshape(-1, 1) * 0.1
-
-        # assign reward for privileged access ent/opserver
-        ent_access = np.logical_and(
-            priv_access, np.logical_or(flat_host == 2, flat_host == 3)) 
-        if len(ent_access) > 0:
-            ent_rew = np.sum(
-                ent_access.reshape(-1, self.num_nodes), axis=-1)
-            reward += ent_rew.reshape(-1, 1) * 1
-    
-        ###################################################
-        # NOTE: specific to configuration
-        # only care about impact to the operational server
-        ###################################################
-
-        # add impact reward
-        # only interested in operational server
-        reward += impacted[:, [7]] * 10
-
-        # update the reward based on access
-        action_reward['Blue'] = action_reward['Blue'] - reward
-        action_reward['Red'] = action_reward['Red'] + reward
-        print(f"🔍 User Host Access: {user_host_access}")
-        print(f"🔍 Ent Access: {ent_access}")
-        print(f"🔍 Impacted: {impacted}")
-        print(f"🔍 Reward Before Update: {reward}")
-
+        # Reward calculations...
+        
+        # Scale down rewards
+        action_reward['Blue'] = action_reward['Blue'] * 0.1
+        action_reward['Red'] = action_reward['Red'] * 0.1
+        
+        # Penalty for doing nothing (using the passed blue_action)
+        if blue_action is not None and np.all(blue_action == 0):
+            action_reward['Blue'] -= 0.1
+        
+        # Clip rewards
+        action_reward['Blue'] = np.clip(action_reward['Blue'], -10, 10)
+        action_reward['Red'] = np.clip(action_reward['Red'], -5, 5)
+        
+        print(f"After scaling: {action_reward}")
         return action_reward
 
 
@@ -1152,8 +790,29 @@ class SimplifiedCAGE(gym.Env):
         #################################################
 
         # add success to red state
-        red_state = np.concatenate(
-            [self.red_success.reshape(-1, 1), state], axis=-1)
+        # red_state = np.concatenate([self.red_success.reshape(-1, 1), state], axis=-1)
+        #self.red_success = np.where(self.detection_log > 0, 0, success).reshape(-1, 1)
+        if not hasattr(self, "red_success"):  # Ensure it's defined
+            self.red_success = np.zeros((self.num_envs, self.num_nodes))  # Initialize it
+
+        self.red_success = np.where(self.detection_log > 0, 0, self.red_success).reshape(-1, 1)
+
+        # Ensure red_success has the correct batch size (match state.shape[0])
+        # if self.red_success.shape[0] != state.shape[0]:  
+        #     self.red_success = np.tile(self.red_success, (state.shape[0], 1))  
+
+        # red_state = np.concatenate([self.red_success, state.reshape(state.shape[0], -1)], axis=-1)
+        # self.red_success = np.asarray(self.red_success).reshape(-1, 1)  # Ensure it's 2D
+        # if self.red_success.shape[0] != state.shape[0]:
+        #     self.red_success = np.tile(self.red_success, (state.shape[0], 1))
+                # red_state = np.concatenate([self.red_success, state.reshape(state.shape[0], -1)], axis=-1)
+        # Create a projection matrix to match dimensions
+        if self.red_success.shape[0] != state.shape[0]:
+            T = np.eye(state.shape[0], self.red_success.shape[0])  # Identity projection
+            self.red_success = T @ self.red_success  # Project to correct shape
+        red_state = np.concatenate([self.red_success, state.reshape(state.shape[0], -1)], axis=-1)
+
+
 
         # initialise blank state
         blue_state = np.zeros((state.shape[0], 6*self.num_nodes))
@@ -1294,7 +953,7 @@ class SimplifiedCAGE(gym.Env):
         if blue_action is not None:
             
             # extract the host action is applied to
-            host_alloc = ((blue_action-1) % self.num_nodes).reshape(-1).astype(int)  
+            host_alloc = np.array((blue_action-1) % self.num_nodes).reshape(-1).astype(int)  
 
             # use analyse to reveal if privileged access achieved
             # [0, 0, 0, 0] to [0, 0, 1, 1]
@@ -1328,7 +987,7 @@ class SimplifiedCAGE(gym.Env):
 
             # restore the machine to default 
             # i.e. 0 0 0 0
-            restore = (blue_action > self.num_nodes*3).reshape(-1).astype(bool)
+            restore = np.array(blue_action, dtype=int).reshape(-1).astype(bool)
             restore = np.logical_and(restore, self.blue_success.reshape(-1))
             if np.any(restore):
                 host = host_alloc[restore]

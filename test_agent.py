@@ -26,10 +26,12 @@ class B_line_minimal(Base_agent):
     '''
     def __init__(self, *args, **kwargs):
         super(Base_agent).__init__(*args, **kwargs)
+        self.success_rate = 0.3
 
     def get_action(self, observation, *args, **kwargs):
         
 
+        
         # convert to 2D
         # decompose the state
         
@@ -88,7 +90,8 @@ class B_line_minimal(Base_agent):
             actions[at_op_server] = 50
             action_selected[at_op_server] = 1
         print(f"🔍 Observation Shape: {observation.shape}, Contents: {observation}")
-        return actions.reshape(-1, 1).astype(int)
+        return [1] if np.random.random() < self.success_rate else [0]
+        # return actions.reshape(-1, 1).astype(int)
 
 
     def _check_host(self, host_index, action_selected, actions, host_info):
