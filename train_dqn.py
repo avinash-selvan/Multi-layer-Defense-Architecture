@@ -54,6 +54,10 @@ class GymCompatibleEnv(SimplifiedCAGE):
                 blue_reward += 20
                 red_reward -= 15
                 self.detection_log = np.ones(13)
+            else:
+                # If Blue detects but no real attack happened, apply a penalty
+                if self.red_success.sum() == 0:  # No actual attack success
+                    blue_reward -= 10  # Penalize false detections
         
         # Penalize for doing nothing
         if self.blue_action == 0:
@@ -112,7 +116,7 @@ model = DQN(
     buffer_size=100000,
     batch_size=128,
     gamma=0.9,
-    exploration_fraction=0.3,
+    exploration_fraction=0.1,
     exploration_final_eps=0.1,
     target_update_interval=500,
     train_freq=4,
@@ -142,12 +146,12 @@ for i in range(5):
 
 # Train the model
 print("\n=== Training Model ===")
-model.learn(total_timesteps=200, progress_bar=True, log_interval=10)
+model.learn(total_timesteps=50, progress_bar=True, log_interval=10)
 model.save("dqn_cyber_defense")
 
 # Evaluation parameters
-NUM_EPISODES = 200
-MAX_STEPS = 200
+NUM_EPISODES = 50
+MAX_STEPS = 50
 
 # Test random agent
 print("\n=== Testing Random Agent ===")
